@@ -1,10 +1,13 @@
 #include "SignalDispatcher.h"
 
 #include <iostream>
+#include <unordered_set>
+#include <sstream>
+#include <iomanip>
 
 namespace sd {
 
-void SignalDispatcher::invoke(const ThunkEntry& entry, const Signal& signal) const {
+void SignalDispatcher::dispatch(const ThunkEntry& entry, const Signal& signal) const {
     try {
         entry.thunk(signal);
     }
@@ -27,7 +30,7 @@ void SignalDispatcher::disconnect(const std::string& stringID) {
         return;
     }
 
-    std::unique_lock lock(mutex);
+    std::unique_lock writeLock(mutex);
 
     const EndpointRecord& record = epIT->second;
 
@@ -58,7 +61,7 @@ void SignalDispatcher::disconnect(const std::string& stringID) {
     endpointMap.erase(epIT);
 }
 
-void SignalDispatcher::sendTo(const std::string& alias, const Signal& signal) {
+void SignalDispatcher::sendTo(const std::string& alias, const Signal& signal) const {
 
     const AliasKey key { alias, typeid(signal) };
 
@@ -66,10 +69,10 @@ void SignalDispatcher::sendTo(const std::string& alias, const Signal& signal) {
 
     ThunkEntry entry;
     {
-        std::shared_lock lock(mutex);
+        std::shared_lock readLock(mutex);
         auto it = aliasMap.find(key);
         if (it == aliasMap.end()) {
-            std::cerr << "SignalDispatcher send() -- no handler function for "
+            std::cerr << "SignalDispatcher sendTo() -- no handler function for "
                       << "alias '" << alias << "' + signal type '"
                       << key.signalType.name() << "'\n";
             return;
@@ -78,47 +81,47 @@ void SignalDispatcher::sendTo(const std::string& alias, const Signal& signal) {
         entry = it->second;
     }
 
-    invoke(entry, signal);
+    dispatch(entry, signal);
 }
 
-void SignalDispatcher::broadcast(const std::string& senderStringID, const Signal& signal) {
+void SignalDispatcher::broadcast(const std::string& senderStringID, const Signal& signal) const {
 
     const std::type_index signalType = typeid(signal);
 
     // Collect thunks under read lock
 
-    std::vector<ThunkEntry> entries;
+    std::vector<ThunkEntry> thunks;
     {
-        std::shared_lock lock(mutex);
+        std::shared_lock readLock(mutex);
         auto it = typeMap.find(signalType);
         if( it == typeMap.end()) {
             return;
         }
-        entries = it->second;
+        thunks = it->second;
     }
 
-    for (const auto& entry : entries) {
-        if (entry.stringID == senderStringID) {
+    for (const auto& thunk : thunks) {
+        if (thunk.stringID == senderStringID) {
             continue;
         }
 
-        invoke(entry, signal);
+        dispatch(thunk, signal);
     }
 }
 
 void SignalDispatcher::multicast(
     const std::string& senderStringID,
     const std::vector<std::string>& aliases,
-    const Signal& signal) {
+    const Signal& signal) const {
 
     const std::type_index signalType = typeid(signal);
 
     // Collect thunks under read lock
 
-    std::vector<ThunkEntry> entries;
-    entries.reserve(aliases.size());
+    std::vector<ThunkEntry> thunkEntries;
+    thunkEntries.reserve(aliases.size());
     {
-        std::shared_lock lock(mutex);
+        std::shared_lock readLock(mutex);
         for(const auto& alias : aliases) {
             const AliasKey key { alias, signalType };
             auto it = aliasMap.find(key);
@@ -128,17 +131,71 @@ void SignalDispatcher::multicast(
                           << signalType.name() << "' -- skipping\n";
                 continue;
             }
-            entries.push_back(it->second);
+            thunkEntries.push_back(it->second);
         }
     }
 
-    for(const auto& entry : entries) {
+    for(const auto& entry : thunkEntries) {
         if (entry.stringID == senderStringID) {
             continue;
         }
 
-        invoke(entry, signal);
+        dispatch(entry, signal);
     }
+}
+
+std::string SignalDispatcher::debugInfo(GroupBy groupBy) const {
+    std::shared_lock readLock(mutex);
+
+    const std::size_t endpointCount = endpointMap.size();
+    const std::size_t aliasCount = aliasMap.size();
+
+    std::unordered_set<std::type_index> uniqueTypes;
+    for(auto& [type, _] : typeMap) {
+        uniqueTypes.insert(type);
+    }
+
+    std::ostringstream out;
+
+    std::string groupLabel = (groupBy == GroupBy::Endpoint) ? "Endpoint" : "Alias";
+    out << "\n=== SignalDispatcher Debug Info (by " << groupLabel << ") ===\n";
+    out << "Endpoints: " << endpointCount
+        << "   Alias+Type bindings: " << aliasCount
+        << "   Unique signal types: " << uniqueTypes.size() << "\n\n";
+
+
+    // Grouping: Endpoint
+    if(groupBy == GroupBy::Endpoint) {
+        for(auto& [stringID, record] : endpointMap) {
+            out << "[" << stringID << "]\n";
+            for(auto& b : record.bindings) {
+                out << " alias: " << std::left << std::setw(24) << b.aliasKey.alias
+                    << " | type: " << b.signalType.name() << "\n";
+            }
+        }
+
+        return out.str();
+    }
+
+    // Grouping: Alias
+    std::unordered_map<std::string, std::vector<std::pair<std::string, std::type_index>>> byAlias;
+
+    for(const auto& [stringID, record] : endpointMap) {
+        for(auto& b : record.bindings) {
+            byAlias[b.aliasKey.alias].emplace_back(stringID, b.signalType);
+        }
+    }
+
+    for(auto& [alias, entries] : byAlias) {
+        out << "[" << alias << "]\n";
+        for(auto& [stringID, type] : entries) {
+            out << " signal type: " << std::left << std::setw(40) << type.name()
+                << " | endpoint: " << stringID << "\n";
+        }
+        out << "\n";
+    }
+
+    return out.str();
 }
 
 } // NAMESPACE SD

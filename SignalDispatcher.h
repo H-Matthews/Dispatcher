@@ -68,7 +68,7 @@ using MemberHandler = void(TEndpoint::*)(const TSignal&);
 // Central mediator that routes signals between endpoints.
 //
 // Three sending modes:
-//     send()      - Point to Point via alias + type_index
+//     sendTo()      - Point to Point via alias + type_index
 //     broadcast() - point to many, all endpoints bound to the signal type
 //     mutlicast() - point to subset, specific list of aliases
 //
@@ -77,7 +77,6 @@ using MemberHandler = void(TEndpoint::*)(const TSignal&);
 //     Read lock held only for map lookup -- released before thunk invocation
 //     Write lock acquired for bind(), unbind(), and disconnect()
 //
-
 class SignalDispatcher {
 public:
     SignalDispatcher() = default;
@@ -232,11 +231,11 @@ public:
 
     // Point to point -- Deliver to one specific alias.
     // Logs a warning if alias + signal type not found.
-    void sendTo(const std::string& alias, const Signal& signal);
+    void sendTo(const std::string& alias, const Signal& signal) const;
 
     // Point to many -- Deliver to a specific list of aliases.
     // Excludes the sender (matched by sender stringID).
-    void broadcast(const std::string& senderStringID, const Signal& signal);
+    void broadcast(const std::string& senderStringID, const Signal& signal) const;
 
     // Point to subset -- Deliver to a specific list of aliases.
     // Exlucde the sender (matched by sender stringID).
@@ -245,15 +244,26 @@ public:
         const std::string& senderStringID,
         const std::vector<std::string>& aliases,
         const Signal& signal
-    );
+    ) const;
+
+    // Diagnostics
+    enum class GroupBy {
+        Endpoint = 0,
+        Alias = 1
+    };
+
+    // Returns a formatted string describing all current registrations.
+    // GroupBy::Endpoint -- organised by stringID, showing aliases and types
+    // GroupBy::Alias    -- organized by alias, showing types and stringIDs
+    std::string debugInfo(GroupBy groupBy = GroupBy::Endpoint) const;
 
 private:
-    // Internal Dispatch
-    void invoke(const ThunkEntry& entry, const Signal& signal) const;
+
+    void dispatch(const ThunkEntry& entry, const Signal& signal) const;
 
     // Internal Maps
 
-    // Used by send() and multicast()
+    // Used by sendTo() and multicast()
     // alias + type_index --> { stringID, thunk }
     std::unordered_map<AliasKey, ThunkEntry, AliasKeyHash> aliasMap;
 
@@ -261,7 +271,7 @@ private:
     // type_index --> [ { string_id, thunk } ]
     std::unordered_map<std::type_index, std::vector<ThunkEntry>> typeMap;
 
-    // Mangement -- Used by bind(), unbind(), and disconnect()
+    // Management -- Used by bind(), unbind(), and disconnect()
     // stringID --> EndpointRecord
     std::unordered_map<std::string, EndpointRecord> endpointMap;
 

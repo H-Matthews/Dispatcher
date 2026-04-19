@@ -97,5 +97,8 @@ int main() {
 
     dispatcher.broadcast("ME", sd::CommandSignal{ "BROADCAST" });
 
+    const std::string endpointStr = dispatcher.debugInfo();
+    std::cout << endpointStr << std::endl;
+
     return 0;
 }
