@@ -109,6 +109,8 @@ public:
         const std::type_index signalType = typeid(TSignal);
         const AliasKey key = { alias, signalType };
 
+        std::unique_lock lock(mutex);
+
         // Validation
 
         // Check 1: stringID + signal type already bound
@@ -137,12 +139,10 @@ public:
         ThunkEntry entry {
             stringID,
             [endpoint, handler](const Signal& sig) {
+                // Call the endpoint handler, and pass the derived signal type
                 (endpoint->*handler)(static_cast<const TSignal&>(sig));
             }
         };
-
-        // Write to all three maps
-        std::unique_lock lock(mutex);
 
         aliasMap.emplace(key, entry);
         typeMap[signalType].push_back(entry);
@@ -164,6 +164,8 @@ public:
 
         const std::type_index signalType = typeid(TSignal);
         const AliasKey aliasKey = { alias, signalType };
+
+        std::unique_lock lock(mutex);
 
         // Validation
 
@@ -190,8 +192,6 @@ public:
                     << stringID << "' under alias '" << alias << "'\n";
             return;
         }
-
-        std::unique_lock lock(mutex);
 
         // Remove from alias map
         aliasMap.erase(aliasKey);
