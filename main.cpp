@@ -14,8 +14,7 @@ public:
         dispatcher.bind<CommandSignal>(
             stringID,
             alias,
-            this,
-            &CommandHandler::onCommand);
+            [this](const CommandSignal& sig) { onCommand(sig); });
     }
 
     ~CommandHandler() {
@@ -44,16 +43,12 @@ public:
         dispatcher.bind<AlertSignal>(
             stringID,
             alias,
-            this,
-            &AlertHandler::onAlert
-        );
+            [this](const AlertSignal& sig) { onAlert(sig); });
 
         dispatcher.bind<CommandSignal>(
             stringID,
             alias,
-            this,
-            &AlertHandler::onCommand
-        );
+            [this](const CommandSignal& sig) { onCommand(sig); });
     }
 
     ~AlertHandler() {
@@ -92,8 +87,23 @@ int main() {
         "AlertHandler"
     );
 
+    // Lambda binding example
+    dispatcher.bind<sd::AlertSignal>(
+        "com.company.test.lambdaHandler",
+        "LambdaAlertHandler",
+        [](const sd::AlertSignal& sig) {
+            std::cout << "Lambda received alert: " << sig.getAlertText() << std::endl;
+        }
+    );
+
     // dispatcher.sendTo("CommandHandler", sd::CommandSignal{ "HELLO" });
     // dispatcher.sendTo("AlertHandler", sd::AlertSignal{ "ALERT! ALERT!" });
+
+    dispatcher.sendTo("LambdaAlertHandler", sd::AlertSignal{ "sensor overheat" });
+
+    dispatcher.unbind<sd::AlertSignal>("LambdaAlertHandler");
+
+    dispatcher.sendTo("LambdaAlertHandler", sd::AlertSignal{ "should not fire" });
 
     dispatcher.broadcast("ME", sd::CommandSignal{ "BROADCAST" });
 

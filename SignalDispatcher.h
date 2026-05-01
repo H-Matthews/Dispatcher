@@ -58,11 +58,6 @@ struct EndpointRecord {
     std::vector<Binding> bindings;
 };
 
-// Free type alias
-template<typename TSignal, typename TEndpoint>
-using MemberHandler = void(TEndpoint::*)(const TSignal&);
-
-
 // SignalDiapatcher
 //
 // Central mediator that routes signals between endpoints.
@@ -86,24 +81,28 @@ public:
     SignalDispatcher(const SignalDispatcher&) = delete;
     SignalDispatcher& operator=(const SignalDispatcher&) = delete;
 
-    // bind() -- Bind a member function handler for a specific signal type
+    // bind() -- Bind a callable (lambda, functor, std::function) for a specific signal type.
     //
-    // First call for a stringID creates the endpoint record.
-    // Subsequent calls add new signal type bindings.
+    // The callable must be invocable with const TSignal&.
+    // Participates in the same lifecycle management as member function bindings:
+    // unbind<TSignal>(alias) removes a single binding, disconnect(stringID) removes all.
     //
-    // Validation (All failures logged as warnings, registration rejected):
+    // Validation (all failures logged as warnings, registration rejected):
     //  1. stringID + signal type already bound
     //  2. Alias + signal type combination already taken
-    template<typename TSignal, typename TEndpoint>
+    template<typename TSignal, typename Callable>
     void bind(
         const std::string& stringID,
         const std::string& alias,
-        TEndpoint* endpoint,
-        MemberHandler<TSignal, TEndpoint> handler) {
+        Callable&& callable) {
 
         static_assert(
             std::is_base_of_v<Signal, TSignal>,
             "TSignal must derive from sd::Signal"
+        );
+        static_assert(
+            std::is_invocable_v<Callable, const TSignal&>,
+            "Callable must be invocable with const TSignal&"
         );
 
         const std::type_index signalType = typeid(TSignal);
@@ -111,36 +110,30 @@ public:
 
         std::unique_lock lock(mutex);
 
-        // Validation
-
         // Check 1: stringID + signal type already bound
-        if(auto ep = endpointMap.find(stringID); ep != endpointMap.end()) {
-            for(const auto& binding : ep->second.bindings) {
+        if (auto ep = endpointMap.find(stringID); ep != endpointMap.end()) {
+            for (const auto& binding : ep->second.bindings) {
                 if (binding.signalType == signalType) {
                     std::cerr << "SignalDispatcher bind() rejected - "
-                            << "stringID '" << stringID << "' already bound to "
-                            << "signal type'" << signalType.name() <<"'\n";
+                              << "stringID '" << stringID << "' already bound to "
+                              << "signal type '" << signalType.name() << "'\n";
                     return;
                 }
             }
         }
 
-        // Check 2. alias + signal type combination already taken
+        // Check 2: alias + signal type combination already taken
         if (aliasMap.count(key)) {
             std::cerr << "SignalDispatcher bind() rejected - "
-                    << "alias'" << alias <<"' + signal type '" << signalType.name()
-                    << "' already taken by another endpoint\n";
+                      << "alias '" << alias << "' + signal type '" << signalType.name()
+                      << "' already taken by another endpoint\n";
             return;
         }
 
-        // Generate Thunk -- Captures endpoint pointer and member function pointer at bind() time
-        // static_cast is safe here due to type identity guranteed by type_index match
-
         ThunkEntry entry {
             stringID,
-            [endpoint, handler](const Signal& sig) {
-                // Call the endpoint handler, and pass the derived signal type
-                (endpoint->*handler)(static_cast<const TSignal&>(sig));
+            [f = std::forward<Callable>(callable)](const Signal& sig) {
+                f(static_cast<const TSignal&>(sig));
             }
         };
 
@@ -148,16 +141,16 @@ public:
         typeMap[signalType].push_back(entry);
         endpointMap[stringID].bindings.emplace_back(key, signalType);
     }
-    
-    // unbind() -- Removes a single signal type binding for a specific endpoint.
-    // 
+
+    // unbind() -- Removes a single signal type binding by alias.
+    //
+    // Works for both member function and callable bindings.
     // Leaves the endpoint record and all other bindings intact.
     //
     // Validation (all failures logged as warnings, unbind rejected):
-    //  1. stringID not found
-    //  2. signal type not bound to this endpoint
+    //  1. alias + signal type not found
     template<typename TSignal>
-    void unbind(const std::string& stringID, const std::string& alias) {
+    void unbind(const std::string& alias) {
 
         static_assert(std::is_base_of_v<Signal, TSignal>,
                  "TSignal must derive from sd::Signal");
@@ -167,36 +160,18 @@ public:
 
         std::unique_lock lock(mutex);
 
-        // Validation
-
-        // Check 1: stringID not found
-        auto epIT = endpointMap.find(stringID);
-        if( epIT == endpointMap.end()) {
+        auto aliasIT = aliasMap.find(aliasKey);
+        if (aliasIT == aliasMap.end()) {
             std::cerr << "SignalDispatcher unbind() rejected -- "
-                    << "stringID '" << stringID << "' not found\n";
+                      << "alias '" << alias << "' + signal type '"
+                      << signalType.name() << "' not found\n";
             return;
         }
 
-        // Check 2: signal type not bound to this endpoint
-        auto& record = epIT->second;
-        auto bindIT =
-            std::find_if(record.bindings.begin(),
-                         record.bindings.end(),
-                        [&aliasKey](const EndpointRecord::Binding& b) {
-                            return b.aliasKey == aliasKey;
-                        });
-        
-        if(bindIT == record.bindings.end()) {
-            std::cerr << "SignalDispatcher unbind() rejected - "
-                    << "signal type '" << signalType.name() << "' not bound to '"
-                    << stringID << "' under alias '" << alias << "'\n";
-            return;
-        }
+        const std::string stringID = aliasIT->second.stringID;
 
-        // Remove from alias map
-        aliasMap.erase(aliasKey);
+        aliasMap.erase(aliasIT);
 
-        // Remove from type map -- erase entry for this stringID
         auto typeIT = typeMap.find(signalType);
         if (typeIT != typeMap.end()) {
             auto& entries = typeIT->second;
@@ -207,15 +182,20 @@ public:
                     }),
                 entries.end()
             );
-
-            // Delete if no entries remain
-            if(entries.empty()) {
-                typeMap.erase(typeIT);
-            }
+            if (entries.empty()) typeMap.erase(typeIT);
         }
 
-        // Remove from endpoint Record
-        record.bindings.erase(bindIT);
+        auto epIT = endpointMap.find(stringID);
+        if (epIT != endpointMap.end()) {
+            auto& bindings = epIT->second.bindings;
+            bindings.erase(
+                std::remove_if(bindings.begin(), bindings.end(),
+                    [&aliasKey](const EndpointRecord::Binding& b) {
+                        return b.aliasKey == aliasKey;
+                    }),
+                bindings.end()
+            );
+        }
     }
 
     // disconnect() -- Removes all bindings for the given stringID.
